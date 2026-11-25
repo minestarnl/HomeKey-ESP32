@@ -99,6 +99,25 @@ uint32_t clampMs(double v) {
   return static_cast<uint32_t>(std::clamp(v, 10.0, 600000.0));
 }
 
+// Parses JSON, also accepting Python-style dict text ({'a': True}) which
+// Home Assistant can produce when a template result is turned into a dict
+// and back into a string before it is published.
+cJSON* parseLenient(const std::string& text) {
+  if (cJSON* root = cJSON_ParseWithLength(text.c_str(), text.size())) return root;
+  std::string fixed;
+  fixed.reserve(text.size());
+  for (size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    auto word = [&](const char* w) { return text.compare(i, strlen(w), w) == 0; };
+    if (c == '\'') { fixed += '"'; }
+    else if (word("True")) { fixed += "true"; i += 3; }
+    else if (word("False")) { fixed += "false"; i += 4; }
+    else if (word("None")) { fixed += "null"; i += 3; }
+    else { fixed += c; }
+  }
+  return cJSON_ParseWithLength(fixed.c_str(), fixed.size());
+}
+
 float gammaCorrect(float level) {
   return std::pow(std::clamp(level, 0.0f, 1.0f), 2.2f);
 }
@@ -231,7 +250,7 @@ void IndicatorManager::handleLed(uint8_t pin, const std::string& raw) {
 
   if (payload.empty()) return;
   if (payload.front() == '{') {
-    cJSON* root = cJSON_ParseWithLength(payload.c_str(), payload.size());
+    cJSON* root = parseLenient(payload);
     if (!root) {
       ESP_LOGW(TAG, "GPIO %u: invalid JSON: %s", pin, payload.c_str());
       return;
@@ -440,7 +459,7 @@ void IndicatorManager::handleBuzzer(uint8_t pin, const std::string& raw) {
   int volume = 100;
 
   if (payload.front() == '{') {
-    cJSON* root = cJSON_ParseWithLength(payload.c_str(), payload.size());
+    cJSON* root = parseLenient(payload);
     if (!root) {
       ESP_LOGW(TAG, "Buzzer GPIO %u: invalid JSON: %s", pin, payload.c_str());
       return;
