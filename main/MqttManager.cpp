@@ -346,9 +346,46 @@ void MqttManager::onConnected() {
         if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to lockCustomStateCmd");
     }
 
+    if (m_indicatorHandler) {
+        const std::string ledTopic = m_mqttConfig.mqttClientId + "/output/+/set";
+        const std::string buzzerTopic = m_mqttConfig.mqttClientId + "/buzzer/+/set";
+        ret = esp_mqtt_client_subscribe(m_client, ledTopic.c_str(), 0);
+        if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to %s", ledTopic.c_str());
+        ret = esp_mqtt_client_subscribe(m_client, buzzerTopic.c_str(), 0);
+        if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to %s", buzzerTopic.c_str());
+    }
+
     if (m_mqttConfig.hassMqttDiscoveryEnabled) {
         publishHassDiscovery();
     }
+}
+
+/**
+ * @brief Forward <clientId>/output/<pin>/set and <clientId>/buzzer/<pin>/set
+ *        messages to the indicator handler.
+ * @return true if the topic was an indicator topic (handled or rejected).
+ */
+bool MqttManager::handleIndicatorMessage(const std::string& topic, const std::string& data) {
+    if (!m_indicatorHandler) return false;
+    const std::string& id = m_mqttConfig.mqttClientId;
+    if (topic.size() <= id.size() + 1 || topic.compare(0, id.size(), id) != 0 || topic[id.size()] != '/') {
+        return false;
+    }
+    const std::string rest = topic.substr(id.size() + 1);   // e.g. "output/25/set"
+    const bool isLed = rest.starts_with("output/");
+    const bool isBuzzer = rest.starts_with("buzzer/");
+    if ((!isLed && !isBuzzer) || !rest.ends_with("/set") || rest.size() <= 11) {
+        return false;
+    }
+    const std::string pinStr = rest.substr(7, rest.size() - 7 - 4);
+    char* end = nullptr;
+    const unsigned long pin = strtoul(pinStr.c_str(), &end, 10);
+    if (pinStr.empty() || end == pinStr.c_str() || *end != '\0' || pin > 254) {
+        ESP_LOGW(TAG, "Invalid GPIO in topic '%s'", topic.c_str());
+        return true;
+    }
+    m_indicatorHandler(isBuzzer, static_cast<uint8_t>(pin), data);
+    return true;
 }
 
 /**
@@ -362,6 +399,8 @@ void MqttManager::onConnected() {
  */
 void MqttManager::onData(const std::string& topic, const std::string& data) {
     ESP_LOGI(TAG, "Received message on topic '%s': %s", topic.c_str(), data.c_str());
+
+    if (handleIndicatorMessage(topic, data)) return;
     
     auto to_u8 = [](const std::string &str, uint8_t& out) -> bool {
       const char* begin = str.c_str(); char* end = nullptr;

@@ -2,6 +2,7 @@
 #include "app_event_loop.hpp"
 #include "eventStructs.hpp"
 #include "mqtt_client.h"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,15 @@ public:
       */
     void publish(const std::string& topic, const std::string& payload, int qos = 0, bool retain = false);
 
+    /**
+      * @brief Route remote LED/buzzer commands.
+      *
+      * Called for messages on <clientId>/output/<pin>/set (buzzer = false) and
+      * <clientId>/buzzer/<pin>/set (buzzer = true).
+      */
+    using IndicatorHandler = std::function<void(bool buzzer, uint8_t pin, const std::string& payload)>;
+    void setIndicatorHandler(IndicatorHandler handler) { m_indicatorHandler = std::move(handler); }
+
 private:
     /**
       * @brief Publishes the current state of the lock.
@@ -127,5 +137,7 @@ private:
     // Status tracking (replaces event-based status publishing)
     MqttErrorCode m_lastErrorCode = MqttErrorCode::NONE;
     std::string m_lastErrorMessage;
+    IndicatorHandler m_indicatorHandler;
+    bool handleIndicatorMessage(const std::string& topic, const std::string& data);
 };
 

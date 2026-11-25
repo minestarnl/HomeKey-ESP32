@@ -12,6 +12,7 @@
 #include "ReaderDataManager.hpp"
 #include "HardwareManager.hpp"
 #include "MqttManager.hpp"
+#include "IndicatorManager.hpp"
 #include "automation/AutomationEngine.hpp"
 #include "WebServerManager.hpp"
 #include <functional>
@@ -29,6 +30,7 @@ NvsCredentialStore readerDataManager;
 ConfigManager configManager;
 std::unique_ptr<HardwareManager> hardwareManager;
 std::unique_ptr<MqttManager> mqttManager;
+std::unique_ptr<IndicatorManager> indicatorManager;
 std::unique_ptr<automation::AutomationEngine> automationEngine;
 WebServerManager webServerManager(configManager, readerDataManager);
 std::unique_ptr<HomeKitLock> homekitLock;
@@ -178,6 +180,12 @@ void setup() {
   hardwareManager = std::make_unique<HardwareManager>(configManager.getConfig<espConfig::actions_config_t>());
   lockManager = std::make_unique<LockManager>(configManager.getConfig<espConfig::misc_config_t>(), configManager.getConfig<espConfig::actions_config_t>());
   mqttManager = std::make_unique<MqttManager>(configManager);
+  indicatorManager = std::make_unique<IndicatorManager>();
+  indicatorManager->begin();
+  mqttManager->setIndicatorHandler([](bool buzzer, uint8_t pin, const std::string& payload) {
+    indicatorManager->submit(buzzer ? IndicatorManager::Target::Buzzer : IndicatorManager::Target::Led,
+                             pin, payload);
+  });
   automationEngine = std::make_unique<automation::AutomationEngine>(
       configManager, mqttManager.get(), lockManager.get());
   automationEngine->begin();
