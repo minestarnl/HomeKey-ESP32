@@ -289,8 +289,8 @@ void IndicatorManager::handleLed(uint8_t pin, const std::string& raw) {
   } else {
     mode.count = 0;
     led->base = mode;
+    if (led->overlay) return;  // applied when the running overlay finishes
     led->active = mode;
-    led->overlay = false;
   }
   led->startMs = nowMs();
   led->lastDuty = -1.0f;  // force refresh
@@ -448,9 +448,15 @@ void IndicatorManager::handleBuzzer(uint8_t pin, const std::string& raw) {
   if (!bz) return;
 
   const std::string p = lower(payload);
-  if (p == "off" || p == "stop" || p == "0" || p == "false") {
-    bz->playing = false;
+  if (p == "stop") {
+    bz->foreground.playing = false;
+    bz->background.playing = false;
     bz->pwm->setDuty(0);
+    return;
+  }
+  if (p == "off" || p == "0" || p == "false") {
+    bz->background.playing = false;
+    if (!bz->foreground.playing) bz->pwm->setDuty(0);
     return;
   }
 
@@ -491,37 +497,57 @@ void IndicatorManager::handleBuzzer(uint8_t pin, const std::string& raw) {
     return;
   }
 
-  bz->notes = std::move(notes);
-  bz->idx = 0;
-  bz->repeatsLeft = repeat <= 0 ? -1 : repeat;
-  bz->volume = static_cast<float>(std::clamp(volume, 0, 100)) / 100.0f;
-  bz->playing = true;
-  startNote(*bz, nowMs());
+  const bool loop = repeat <= 0;
+  Sequence& seq = loop ? bz->background : bz->foreground;
+  seq.notes = std::move(notes);
+  seq.idx = 0;
+  seq.repeatsLeft = loop ? -1 : repeat;
+  seq.volume = static_cast<float>(std::clamp(volume, 0, 100)) / 100.0f;
+  seq.playing = true;
+  // a new background waits silently while a foreground sound is playing
+  if (!loop || !bz->foreground.playing) startNote(*bz, seq, nowMs());
 }
 
-void IndicatorManager::startNote(Buzzer& bz, int64_t now) {
-  const Note& n = bz.notes[bz.idx];
+void IndicatorManager::startNote(Buzzer& bz, Sequence& seq, int64_t now) {
+  const Note& n = seq.notes[seq.idx];
   if (n.freq == 0) {
     bz.pwm->setDuty(0);
   } else {
     bz.pwm->setFreq(n.freq);
-    bz.pwm->setDuty(0.5f * bz.volume);  // 50% duty = loudest for a piezo
+    bz.pwm->setDuty(0.5f * seq.volume);  // 50% duty = loudest for a piezo
   }
-  bz.noteEnd = now + n.ms;
+  seq.noteEnd = now + n.ms;
+}
+
+// Moves `seq` to its next note. Returns false when the sequence has ended.
+bool IndicatorManager::advance(Sequence& seq) {
+  if (++seq.idx >= seq.notes.size()) {
+    if (seq.repeatsLeft < 0 || --seq.repeatsLeft > 0) {
+      seq.idx = 0;
+    } else {
+      seq.playing = false;
+      return false;
+    }
+  }
+  return true;
 }
 
 void IndicatorManager::updateBuzzers(int64_t now) {
   for (auto& [pin, bz] : m_buzzers) {
-    if (!bz.playing || now < bz.noteEnd) continue;
-    if (++bz.idx >= bz.notes.size()) {
-      if (bz.repeatsLeft < 0 || --bz.repeatsLeft > 0) {
-        bz.idx = 0;
+    if (bz.foreground.playing) {
+      if (now < bz.foreground.noteEnd) continue;
+      if (advance(bz.foreground)) {
+        startNote(bz, bz.foreground, now);
+      } else if (bz.background.playing) {
+        bz.background.idx = 0;  // resume the background from its start
+        startNote(bz, bz.background, now);
       } else {
-        bz.playing = false;
         bz.pwm->setDuty(0);
-        continue;
       }
+    } else if (bz.background.playing) {
+      if (now < bz.background.noteEnd) continue;
+      if (advance(bz.background)) startNote(bz, bz.background, now);
+      else bz.pwm->setDuty(0);
     }
-    startNote(bz, now);
   }
 }

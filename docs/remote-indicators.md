@@ -23,15 +23,23 @@ Plain `ON` / `OFF`, or JSON:
 - `effect`: `none` (solid), `blink`, `pulse` (fade up in `on_ms`, down in `off_ms`)
 - `count: 0` makes this the pin's steady state
 - `count > 0` plays the effect that many times, then returns to the steady state
-  (e.g. a green double blink on top of whatever the LED was showing)
+  (e.g. a green double blink on top of whatever the LED was showing). A steady
+  state sent while it plays is applied once it finishes.
 - `inverted: true` for LEDs wired to 3.3V (active low); remembered per pin
 
 ## Buzzer (passive)
 
-- `OFF` / `STOP`
+- `OFF` stops the background sound, `STOP` stops everything
 - a built-in tone name: `beep`, `double`, `accepted`, `denied`, `chime`, `exit`, `entry`, `alarm`
 - an RTTTL melody: `name:d=8,o=6,b=180:c,e,g`
 - JSON: `{"tone": "entry", "repeat": 0, "volume": 80}`, `{"rtttl": "..."}`
   or `{"freq": 2000, "ms": 150, "gap_ms": 50}`
   - `repeat`: times to play (default 1), `0` = until `OFF`
   - `volume`: 0-100
+
+A sound with `repeat: 0` becomes the background (e.g. entry-delay beeping).
+A sound with a finite `repeat` plays on top of it, and the background resumes
+afterwards.
+
+Payloads may also be Python-style dict text (`{'tone': 'entry'}`), which Home
+Assistant sometimes publishes for templated JSON.

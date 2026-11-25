@@ -16,14 +16,18 @@
  *    "on_ms":500,"off_ms":500,"count":0,"inverted":false}
  *   count = 0  -> becomes the steady state of the pin
  *   count > 0  -> plays the effect `count` times, then returns to the
- *                 previous steady state (handy for accept/deny flashes)
+ *                 steady state (handy for accept/deny flashes); a steady
+ *                 state that arrives meanwhile is applied afterwards
  *
  * Buzzer payloads (passive buzzer):
- *   "OFF" / "STOP"
+ *   "OFF"   stops the background (looping) sound
+ *   "STOP"  stops everything
  *   "accepted"                      built-in tone name
  *   "name:d=8,o=6,b=180:c,e,g"      RTTTL melody
  *   {"tone":"accepted"} | {"rtttl":"..."} | {"freq":2000,"ms":150}
  *   optional: "repeat": n (default 1, 0 = until stopped), "volume": 0-100
+ *   repeat 0 sets the background sound (e.g. entry-delay beeping); a finite
+ *   repeat plays on top of it and the background resumes afterwards.
  *   built-in tones: beep, double, accepted, denied, chime, exit, entry, alarm
  *
  * Pins are claimed through GPIOAllocator, so pins in use by the NFC reader,
@@ -87,15 +91,20 @@ private:
     uint16_t ms;
   };
 
-  struct Buzzer {
-    std::unique_ptr<IndicatorPwm> pwm;
-    GPIOAllocator::GPIOLease lease;
+  struct Sequence {
     std::vector<Note> notes;
     size_t idx = 0;
     int64_t noteEnd = 0;
     int32_t repeatsLeft = 0; // -1 = forever
     float volume = 1.0f;
     bool playing = false;
+  };
+
+  struct Buzzer {
+    std::unique_ptr<IndicatorPwm> pwm;
+    GPIOAllocator::GPIOLease lease;
+    Sequence background;     // repeat = 0 (loops until OFF), e.g. entry delay
+    Sequence foreground;     // finite repeat, plays over the background
   };
 
   static void taskEntry(void* arg);
@@ -105,7 +114,8 @@ private:
   void handleBuzzer(uint8_t pin, const std::string& payload);
   void updateLeds(int64_t now);
   void updateBuzzers(int64_t now);
-  void startNote(Buzzer& bz, int64_t now);
+  void startNote(Buzzer& bz, Sequence& seq, int64_t now);
+  static bool advance(Sequence& seq);
 
   Led* ledFor(uint8_t pin, std::optional<bool> inverted);
   Buzzer* buzzerFor(uint8_t pin);
