@@ -108,11 +108,11 @@ cJSON* parseLenient(const std::string& text) {
   fixed.reserve(text.size());
   for (size_t i = 0; i < text.size(); ++i) {
     const char c = text[i];
-    auto word = [&](const char* w) { return text.compare(i, strlen(w), w) == 0; };
+    auto startsWith = [&](const char* w) { return text.compare(i, strlen(w), w) == 0; };
     if (c == '\'') { fixed += '"'; }
-    else if (word("True")) { fixed += "true"; i += 3; }
-    else if (word("False")) { fixed += "false"; i += 4; }
-    else if (word("None")) { fixed += "null"; i += 3; }
+    else if (startsWith("True")) { fixed += "true"; i += 3; }
+    else if (startsWith("False")) { fixed += "false"; i += 4; }
+    else if (startsWith("None")) { fixed += "null"; i += 3; }
     else { fixed += c; }
   }
   return cJSON_ParseWithLength(fixed.c_str(), fixed.size());
