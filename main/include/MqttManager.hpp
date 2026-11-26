@@ -2,6 +2,7 @@
 #include "app_event_loop.hpp"
 #include "eventStructs.hpp"
 #include "mqtt_client.h"
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,22 @@ public:
       */
     void publish(const std::string& topic, const std::string& payload, int qos = 0, bool retain = false);
 
+    /**
+      * @brief Route remote LED/buzzer/input commands.
+      *
+      * kind = "output" for <clientId>/output/<pin>/set,
+      *        "buzzer" for <clientId>/buzzer/<pin>/set,
+      *        "input"  for <clientId>/input/<pin>/config.
+      */
+    using IndicatorHandler = std::function<void(const std::string& kind, uint8_t pin, const std::string& payload)>;
+    void setIndicatorHandler(IndicatorHandler handler) { m_indicatorHandler = std::move(handler); }
+
+    /** @brief MQTT client ID, the prefix of all topics of this device. */
+    const std::string& clientId() const { return m_mqttConfig.mqttClientId; }
+
+    /** @brief Publish (or, with empty name, remove) HA discovery for a GPIO input. */
+    void publishInputDiscovery(uint8_t pin, const std::string& name, const std::string& deviceClass);
+
 private:
     /**
       * @brief Publishes the current state of the lock.
@@ -127,5 +144,7 @@ private:
     // Status tracking (replaces event-based status publishing)
     MqttErrorCode m_lastErrorCode = MqttErrorCode::NONE;
     std::string m_lastErrorMessage;
+    IndicatorHandler m_indicatorHandler;
+    bool handleIndicatorMessage(const std::string& topic, const std::string& data);
 };
 
