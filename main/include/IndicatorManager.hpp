@@ -30,10 +30,21 @@
  *   repeat plays on top of it and the background resumes afterwards.
  *   built-in tones: beep, double, accepted, denied, chime, exit, entry, alarm
  *
+ * Inputs (e.g. a door reed switch), configured with a retained message:
+ *   <clientId>/input/<pin>/config
+ *   {"name":"Server room door","device_class":"door","pull":"up",
+ *    "invert":false,"debounce_ms":50}
+ *   State is published to <clientId>/input/<pin>/state as ON/OFF (retained)
+ *   and the input appears in Home Assistant as a binary_sensor (discovery).
+ *   Default: pull-up, ON when the pin is HIGH, i.e. a reed switch to GND
+ *   reads ON (open) when the magnet is away. "invert" flips this.
+ *   An empty config payload removes the input.
+ *
  * Pins are claimed through GPIOAllocator, so pins in use by the NFC reader,
  * ethernet or other actions are refused.
  */
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -48,12 +59,20 @@ class IndicatorPwm;
 
 class IndicatorManager {
 public:
-  enum class Target : uint8_t { Led, Buzzer };
+  enum class Target : uint8_t { Led, Buzzer, Input };
 
   IndicatorManager();
   ~IndicatorManager();
 
   void begin();
+
+  using PublishFn = std::function<void(const std::string& topicSuffix, const std::string& payload, bool retain)>;
+  using DiscoveryFn = std::function<void(uint8_t pin, const std::string& name, const std::string& deviceClass)>;
+  /** Callbacks used to report input states; set before begin(). */
+  void setPublisher(PublishFn publish, DiscoveryFn discovery) {
+    m_publish = std::move(publish);
+    m_discovery = std::move(discovery);
+  }
 
   /** Queue a command; safe to call from any task (e.g. the MQTT task). */
   void submit(Target target, uint8_t pin, const std::string& payload);
@@ -107,6 +126,18 @@ private:
     Sequence foreground;     // finite repeat, plays over the background
   };
 
+  struct Input {
+    GPIOAllocator::GPIOLease lease;
+    std::string name;
+    std::string deviceClass;
+    bool invert = false;
+    uint32_t debounceMs = 50;
+    int stableLevel = -1;     // debounced raw level
+    int pendingLevel = -1;
+    int64_t pendingSince = 0;
+    int64_t lastPublish = 0;
+  };
+
   static void taskEntry(void* arg);
   void run();
   void handle(const Command& cmd);
@@ -114,6 +145,9 @@ private:
   void handleBuzzer(uint8_t pin, const std::string& payload);
   void updateLeds(int64_t now);
   void updateBuzzers(int64_t now);
+  void handleInput(uint8_t pin, const std::string& payload);
+  void updateInputs(int64_t now);
+  void publishInput(uint8_t pin, Input& in, int64_t now);
   void startNote(Buzzer& bz, Sequence& seq, int64_t now);
   static bool advance(Sequence& seq);
 
@@ -125,6 +159,9 @@ private:
 
   std::map<uint8_t, Led> m_leds;
   std::map<uint8_t, Buzzer> m_buzzers;
+  std::map<uint8_t, Input> m_inputs;
+  PublishFn m_publish;
+  DiscoveryFn m_discovery;
   QueueHandle_t m_queue = nullptr;
   TaskHandle_t m_task = nullptr;
 

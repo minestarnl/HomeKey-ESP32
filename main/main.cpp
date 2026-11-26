@@ -181,11 +181,19 @@ void setup() {
   lockManager = std::make_unique<LockManager>(configManager.getConfig<espConfig::misc_config_t>(), configManager.getConfig<espConfig::actions_config_t>());
   mqttManager = std::make_unique<MqttManager>(configManager);
   indicatorManager = std::make_unique<IndicatorManager>();
-  indicatorManager->begin();
-  mqttManager->setIndicatorHandler([](bool buzzer, uint8_t pin, const std::string& payload) {
-    indicatorManager->submit(buzzer ? IndicatorManager::Target::Buzzer : IndicatorManager::Target::Led,
-                             pin, payload);
+  indicatorManager->setPublisher(
+      [](const std::string& topicSuffix, const std::string& payload, bool retain) {
+        mqttManager->publish(mqttManager->clientId() + "/" + topicSuffix, payload, 1, retain);
+      },
+      [](uint8_t pin, const std::string& name, const std::string& deviceClass) {
+        mqttManager->publishInputDiscovery(pin, name, deviceClass);
+      });
+  mqttManager->setIndicatorHandler([](const std::string& kind, uint8_t pin, const std::string& payload) {
+    using T = IndicatorManager::Target;
+    const T target = kind == "buzzer" ? T::Buzzer : kind == "input" ? T::Input : T::Led;
+    indicatorManager->submit(target, pin, payload);
   });
+  indicatorManager->begin();
   automationEngine = std::make_unique<automation::AutomationEngine>(
       configManager, mqttManager.get(), lockManager.get());
   automationEngine->begin();

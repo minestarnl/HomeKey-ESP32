@@ -349,10 +349,11 @@ void MqttManager::onConnected() {
     if (m_indicatorHandler) {
         const std::string ledTopic = m_mqttConfig.mqttClientId + "/output/+/set";
         const std::string buzzerTopic = m_mqttConfig.mqttClientId + "/buzzer/+/set";
-        ret = esp_mqtt_client_subscribe(m_client, ledTopic.c_str(), 0);
-        if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to %s", ledTopic.c_str());
-        ret = esp_mqtt_client_subscribe(m_client, buzzerTopic.c_str(), 0);
-        if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to %s", buzzerTopic.c_str());
+        const std::string inputTopic = m_mqttConfig.mqttClientId + "/input/+/config";
+        for (const std::string* t : {&ledTopic, &buzzerTopic, &inputTopic}) {
+            ret = esp_mqtt_client_subscribe(m_client, t->c_str(), 1);
+            if (ret < 0) ESP_LOGW(TAG, "Failed to subscribe to %s", t->c_str());
+        }
     }
 
     if (m_mqttConfig.hassMqttDiscoveryEnabled) {
@@ -372,19 +373,24 @@ bool MqttManager::handleIndicatorMessage(const std::string& topic, const std::st
         return false;
     }
     const std::string rest = topic.substr(id.size() + 1);   // e.g. "output/25/set"
-    const bool isLed = rest.starts_with("output/");
-    const bool isBuzzer = rest.starts_with("buzzer/");
-    if ((!isLed && !isBuzzer) || !rest.ends_with("/set") || rest.size() <= 11) {
+    std::string kind;
+    std::string suffix;
+    if (rest.starts_with("output/")) { kind = "output"; suffix = "/set"; }
+    else if (rest.starts_with("buzzer/")) { kind = "buzzer"; suffix = "/set"; }
+    else if (rest.starts_with("input/")) { kind = "input"; suffix = "/config"; }
+    else return false;
+    const size_t prefixLen = kind.size() + 1;
+    if (!rest.ends_with(suffix) || rest.size() <= prefixLen + suffix.size()) {
         return false;
     }
-    const std::string pinStr = rest.substr(7, rest.size() - 7 - 4);
+    const std::string pinStr = rest.substr(prefixLen, rest.size() - prefixLen - suffix.size());
     char* end = nullptr;
     const unsigned long pin = strtoul(pinStr.c_str(), &end, 10);
     if (pinStr.empty() || end == pinStr.c_str() || *end != '\0' || pin > 254) {
         ESP_LOGW(TAG, "Invalid GPIO in topic '%s'", topic.c_str());
         return true;
     }
-    m_indicatorHandler(isBuzzer, static_cast<uint8_t>(pin), data);
+    m_indicatorHandler(kind, static_cast<uint8_t>(pin), data);
     return true;
 }
 
@@ -735,4 +741,46 @@ void MqttManager::publishMqttStatus(bool connected, MqttErrorCode errorCode, con
     m_lastErrorCode = errorCode;
     m_lastErrorMessage = errorMessage;
     ESP_LOGD(TAG, "Updated MQTT status: connected=%s, errorCode=%d", connected ? "true" : "false", static_cast<uint8_t>(errorCode));
+}
+
+/**
+ * @brief Publish Home Assistant discovery for a GPIO input as a binary_sensor
+ *        under this device. An empty name removes the entity.
+ */
+void MqttManager::publishInputDiscovery(uint8_t pin, const std::string& name, const std::string& deviceClass) {
+    const std::string topic = "homeassistant/binary_sensor/" + m_mqttConfig.mqttClientId +
+                              "/gpio" + std::to_string(pin) + "/config";
+    if (name.empty()) {
+        publish(topic, "", 1, true);
+        return;
+    }
+
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_BT);
+    std::string macStr = fmt::format("HK-{:02X}{:02X}{:02X}{:02X}", mac[2], mac[3], mac[4], mac[5]);
+
+    JsonBuilder device = JsonBuilder::object();
+    JsonBuilder identifiers = JsonBuilder::array();
+    JsonBuilder payload = JsonBuilder::object();
+    if (!device || !identifiers || !payload) {
+        ESP_LOGE(TAG, "Failed to allocate input discovery JSON (OOM)");
+        return;
+    }
+    // same identifiers as the lock entity, so HA groups it under the same device
+    identifiers.addItemToArray(JsonGuard(cJSON_CreateString(deviceID.c_str())));
+    identifiers.addItemToArray(JsonGuard(cJSON_CreateString(macStr.c_str())));
+    device.addItem("identifiers", JsonGuard(identifiers.release()));
+
+    const std::string stateTopic = m_mqttConfig.mqttClientId + "/input/" + std::to_string(pin) + "/state";
+    const std::string uniqueId = deviceID + "_gpio" + std::to_string(pin);
+    payload.addString("name", name.c_str());
+    payload.addString("unique_id", uniqueId.c_str());
+    payload.addString("state_topic", stateTopic.c_str());
+    payload.addString("payload_on", "ON");
+    payload.addString("payload_off", "OFF");
+    if (!deviceClass.empty()) payload.addString("device_class", deviceClass.c_str());
+    payload.addString("availability_topic", m_mqttConfig.lwtTopic.c_str());
+    payload.addItem("device", JsonGuard(device.release()));
+
+    publish(topic, payload.toStringUnformatted(), 1, true);
 }

@@ -43,3 +43,22 @@ afterwards.
 
 Payloads may also be Python-style dict text (`{'tone': 'entry'}`), which Home
 Assistant sometimes publishes for templated JSON.
+
+## Inputs (door contact, button, …)
+
+Configure an input with a **retained** message, so it is restored after every
+reboot/reconnect:
+
+| Topic | Payload |
+|---|---|
+| `<clientId>/input/<pin>/config` | `{"name": "Server room door", "device_class": "door", "pull": "up", "invert": false, "debounce_ms": 50}` |
+
+- The input appears in Home Assistant as a `binary_sensor` on the reader's
+  device (MQTT discovery), state on `<clientId>/input/<pin>/state` (`ON`/`OFF`, retained).
+- Default: internal pull-up, `ON` when the pin is HIGH. A reed switch between
+  the pin and GND therefore reads `OFF` (closed) with the magnet near and `ON`
+  (open) when the door opens. `invert: true` flips this.
+- `pull`: `up` (default), `down` or `none`.
+- An empty retained payload on the config topic removes the input and its entity.
+- On the classic ESP32, GPIO 34–39 have no internal pull-ups; use another pin
+  or an external resistor.

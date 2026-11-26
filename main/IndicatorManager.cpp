@@ -170,15 +170,16 @@ void IndicatorManager::run() {
     const int64_t now = nowMs();
     updateLeds(now);
     updateBuzzers(now);
+    updateInputs(now);
   }
 }
 
 void IndicatorManager::handle(const Command& cmd) {
   if (!cmd.payload) return;
-  if (cmd.target == Target::Led) {
-    handleLed(cmd.pin, *cmd.payload);
-  } else {
-    handleBuzzer(cmd.pin, *cmd.payload);
+  switch (cmd.target) {
+    case Target::Led: handleLed(cmd.pin, *cmd.payload); break;
+    case Target::Buzzer: handleBuzzer(cmd.pin, *cmd.payload); break;
+    case Target::Input: handleInput(cmd.pin, *cmd.payload); break;
   }
 }
 
@@ -190,8 +191,8 @@ IndicatorManager::Led* IndicatorManager::ledFor(uint8_t pin, std::optional<bool>
     if (inverted) it->second.pwm->setInverted(*inverted);
     return &it->second;
   }
-  if (m_buzzers.contains(pin)) {
-    ESP_LOGW(TAG, "GPIO %u is already used as a buzzer", pin);
+  if (m_buzzers.contains(pin) || m_inputs.contains(pin)) {
+    ESP_LOGW(TAG, "GPIO %u is already used as a buzzer or input", pin);
     return nullptr;
   }
   auto lease = GPIOAllocator::instance().acquire(
@@ -216,8 +217,8 @@ IndicatorManager::Led* IndicatorManager::ledFor(uint8_t pin, std::optional<bool>
 
 IndicatorManager::Buzzer* IndicatorManager::buzzerFor(uint8_t pin) {
   if (auto it = m_buzzers.find(pin); it != m_buzzers.end()) return &it->second;
-  if (m_leds.contains(pin)) {
-    ESP_LOGW(TAG, "GPIO %u is already used as an LED", pin);
+  if (m_leds.contains(pin) || m_inputs.contains(pin)) {
+    ESP_LOGW(TAG, "GPIO %u is already used as an LED or input", pin);
     return nullptr;
   }
   auto lease = GPIOAllocator::instance().acquire(
@@ -548,6 +549,104 @@ void IndicatorManager::updateBuzzers(int64_t now) {
       if (now < bz.background.noteEnd) continue;
       if (advance(bz.background)) startNote(bz, bz.background, now);
       else bz.pwm->setDuty(0);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inputs (e.g. door reed switch)
+// ---------------------------------------------------------------------------
+void IndicatorManager::handleInput(uint8_t pin, const std::string& raw) {
+  const std::string payload = trim(raw);
+
+  // empty payload = remove the input
+  if (payload.empty() || lower(payload) == "off") {
+    if (m_inputs.erase(pin) > 0) {
+      ESP_LOGI(TAG, "Input on GPIO %u removed", pin);
+      if (m_discovery) m_discovery(pin, "", "");
+    }
+    return;
+  }
+  if (m_leds.contains(pin) || m_buzzers.contains(pin)) {
+    ESP_LOGW(TAG, "GPIO %u is already used as an output", pin);
+    return;
+  }
+
+  std::string name = "GPIO " + std::to_string(pin);
+  std::string deviceClass = "door";
+  std::string pull = "up";
+  bool invert = false;
+  uint32_t debounce = 50;
+  if (payload.front() == '{') {
+    cJSON* root = parseLenient(payload);
+    if (!root) {
+      ESP_LOGW(TAG, "Input GPIO %u: invalid JSON: %s", pin, payload.c_str());
+      return;
+    }
+    if (const char* v = jsonString(root, "name")) name = v;
+    if (const char* v = jsonString(root, "device_class")) deviceClass = v;
+    if (const char* v = jsonString(root, "pull")) pull = lower(v);
+    cJSON* inv = cJSON_GetObjectItemCaseSensitive(root, "invert");
+    invert = cJSON_IsTrue(inv);
+    debounce = static_cast<uint32_t>(std::clamp(jsonNumber(root, "debounce_ms", 50), 0.0, 5000.0));
+    cJSON_Delete(root);
+  } else if (lower(payload) != "on") {
+    name = payload;  // plain text = name
+  }
+
+  auto it = m_inputs.find(pin);
+  if (it == m_inputs.end()) {
+    auto lease = GPIOAllocator::instance().acquire(
+        static_cast<gpio_num_t>(pin), GPIO_MODE_INPUT, GPIOAllocator::PinRole::GpioIn,
+        GPIOAllocator::PinConsumer::Hardware, "mqtt-input");
+    if (!lease.has_value() || !lease->valid()) {
+      ESP_LOGW(TAG, "GPIO %u is not available for an input", pin);
+      return;
+    }
+    Input in;
+    in.lease = std::move(*lease);
+    it = m_inputs.emplace(pin, std::move(in)).first;
+    ESP_LOGI(TAG, "Input on GPIO %u ('%s')", pin, name.c_str());
+  }
+
+  const gpio_num_t gpio = static_cast<gpio_num_t>(pin);
+  gpio_set_direction(gpio, GPIO_MODE_INPUT);
+  if (pull == "down") gpio_set_pull_mode(gpio, GPIO_PULLDOWN_ONLY);
+  else if (pull == "none" || pull == "off") gpio_set_pull_mode(gpio, GPIO_FLOATING);
+  else gpio_set_pull_mode(gpio, GPIO_PULLUP_ONLY);
+
+  Input& in = it->second;
+  in.name = name;
+  in.deviceClass = deviceClass;
+  in.invert = invert;
+  in.debounceMs = debounce;
+  in.stableLevel = gpio_get_level(gpio);
+  in.pendingLevel = in.stableLevel;
+
+  if (m_discovery) m_discovery(pin, in.name, in.deviceClass);
+  publishInput(pin, in, nowMs());  // (re)publish current state, e.g. after reconnect
+}
+
+void IndicatorManager::publishInput(uint8_t pin, Input& in, int64_t now) {
+  in.lastPublish = now;
+  if (!m_publish || in.stableLevel < 0) return;
+  const bool on = (in.stableLevel != 0) != in.invert;
+  m_publish("input/" + std::to_string(pin) + "/state", on ? "ON" : "OFF", true);
+}
+
+void IndicatorManager::updateInputs(int64_t now) {
+  for (auto& [pin, in] : m_inputs) {
+    const int level = gpio_get_level(static_cast<gpio_num_t>(pin));
+    if (level != in.pendingLevel) {
+      in.pendingLevel = level;
+      in.pendingSince = now;
+    }
+    if (in.pendingLevel != in.stableLevel && now - in.pendingSince >= in.debounceMs) {
+      in.stableLevel = in.pendingLevel;
+      ESP_LOGI(TAG, "Input GPIO %u -> %s", pin, ((in.stableLevel != 0) != in.invert) ? "ON" : "OFF");
+      publishInput(pin, in, now);
+    } else if (now - in.lastPublish >= 60000) {
+      publishInput(pin, in, now);  // periodic refresh (retained)
     }
   }
 }

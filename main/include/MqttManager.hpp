@@ -71,13 +71,20 @@ public:
     void publish(const std::string& topic, const std::string& payload, int qos = 0, bool retain = false);
 
     /**
-      * @brief Route remote LED/buzzer commands.
+      * @brief Route remote LED/buzzer/input commands.
       *
-      * Called for messages on <clientId>/output/<pin>/set (buzzer = false) and
-      * <clientId>/buzzer/<pin>/set (buzzer = true).
+      * kind = "output" for <clientId>/output/<pin>/set,
+      *        "buzzer" for <clientId>/buzzer/<pin>/set,
+      *        "input"  for <clientId>/input/<pin>/config.
       */
-    using IndicatorHandler = std::function<void(bool buzzer, uint8_t pin, const std::string& payload)>;
+    using IndicatorHandler = std::function<void(const std::string& kind, uint8_t pin, const std::string& payload)>;
     void setIndicatorHandler(IndicatorHandler handler) { m_indicatorHandler = std::move(handler); }
+
+    /** @brief MQTT client ID, the prefix of all topics of this device. */
+    const std::string& clientId() const { return m_mqttConfig.mqttClientId; }
+
+    /** @brief Publish (or, with empty name, remove) HA discovery for a GPIO input. */
+    void publishInputDiscovery(uint8_t pin, const std::string& name, const std::string& deviceClass);
 
 private:
     /**
